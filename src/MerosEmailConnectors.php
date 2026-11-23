@@ -3,6 +3,7 @@
 namespace MM\Meros\EmailConnectors;
 
 use MM\Meros\App\Package;
+use MM\Meros\EmailConnectors\App\Integrations\Microsoft365;
 
 final class MerosEmailConnectors extends Package {
     /**
@@ -18,7 +19,7 @@ final class MerosEmailConnectors extends Package {
     }
 
     public function configure(): void {
-        
+        $this->integrations(Microsoft365::class)->make();
     }
 
 
