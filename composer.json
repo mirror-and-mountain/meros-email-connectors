@@ -16,7 +16,7 @@
     },
     "require-dev": {
         "illuminate/testing": "^13.0",
-        "mirror-and-mountain/meros-framework": "dev-main",
+        "mirror-and-mountain/meros-framework": "^1.0",
         "phpunit/phpunit": "^9.6",
         "yoast/phpunit-polyfills": "^3.1"
     },
@@ -29,16 +29,6 @@
         "test": "phpunit -c phpunit.xml",
         "test:integration": "phpunit -c phpunit.integration.xml"
     },
-    "repositories": [
-        {
-            "type": "vcs",
-            "url": "https://github.com/mirror-and-mountain/meros-framework"
-        },
-        {
-            "type": "vcs",
-            "url": "https://github.com/mirror-and-mountain/meros-foundations"
-        }
-    ],
     "autoload": {
         "psr-4": {
             "MM\\Meros\\EmailConnectors\\": "src/",
