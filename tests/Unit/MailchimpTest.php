@@ -14,10 +14,16 @@ use MailchimpTransactional\ApiClient as TransactionalClient;
 use MailchimpTransactional\Configuration as TransactionalConfiguration;
 use MM\Meros\Contracts\Features\Integrations\Integration;
 use MM\Meros\Contracts\Features\Integrations\Interfaces\Mailer;
+use MM\Meros\Contracts\Features\Automation\FlowAction;
+use MM\Meros\EmailConnectors\App\Integrations\Mailchimp;
 use MM\Meros\EmailConnectors\Tests\Support\MailchimpClientDouble;
 use MM\Meros\EmailConnectors\Tests\Support\MailchimpTestSettings;
 use MM\Meros\EmailConnectors\Tests\Support\TestMailchimp;
 use MM\Meros\Foundations\Testing\WordPressState;
+use MM\Meros\Facades\Support\Registers;
+use MM\Meros\Registers\Automation\FlowActions;
+use MM\Meros\Support\Registers as RegistersRegistry;
+use MM\Meros\Testing\FeatureProvider;
 use Composer\Autoload\ClassLoader;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
@@ -31,6 +37,10 @@ class MailchimpTest extends TestCase {
     private MailchimpTestSettings $settings;
     private bool $hadOptions;
     private mixed $previousOptions;
+    private bool $hadHooks;
+    private mixed $previousHooks;
+    private bool $changedRegisters = false;
+    private mixed $previousRegisters = null;
 
     protected function setUp(): void {
         if (!function_exists('get_option')) {
@@ -50,6 +60,8 @@ class MailchimpTest extends TestCase {
         $this->settings->initialiseForTest();
         $this->hadOptions = array_key_exists('mailchimp_test', WordPressState::$options);
         $this->previousOptions = WordPressState::$options['mailchimp_test'] ?? null;
+        $this->hadHooks = array_key_exists('meros_integration_configured_test_mailchimp', WordPressState::$hooks);
+        $this->previousHooks = WordPressState::$hooks['meros_integration_configured_test_mailchimp'] ?? null;
         WordPressState::$options['mailchimp_test'] = [
             'test_mailchimp_enabled' => true,
             'marketing_api_key_default' => 'fake-key-us7',
@@ -64,6 +76,18 @@ class MailchimpTest extends TestCase {
             WordPressState::$options['mailchimp_test'] = $this->previousOptions;
         } else {
             unset(WordPressState::$options['mailchimp_test']);
+        }
+        if ($this->hadHooks) {
+            WordPressState::$hooks['meros_integration_configured_test_mailchimp'] = $this->previousHooks;
+        } else {
+            unset(WordPressState::$hooks['meros_integration_configured_test_mailchimp']);
+        }
+        if ($this->changedRegisters) {
+            if ($this->previousRegisters !== null) {
+                Registers::swap($this->previousRegisters);
+            } else {
+                Registers::clearResolvedInstance('meros.helpers.registers');
+            }
         }
     }
 
@@ -276,5 +300,92 @@ class MailchimpTest extends TestCase {
         $mailchimp = $this->mockedClient([], $history);
         $this->assertFailure(fn () => $mailchimp->getAudiences(), RuntimeException::class, 'marketing api key is not configured');
         self::assertSame([], $history);
+    }
+
+    private function templateAction(TestMailchimp $mailchimp): FlowAction {
+        if (!(new ReflectionProperty(WordPressState::class, 'theme'))->isInitialized()) {
+            WordPressState::$theme = dirname(__DIR__);
+        }
+        $this->previousRegisters = Registers::getFacadeRoot();
+        $this->changedRegisters = true;
+        Registers::swap(new RegistersRegistry());
+        $register = new FlowActions();
+        $mailchimp->setProvider(new FeatureProvider(__DIR__));
+        (new ReflectionMethod(Mailchimp::class, 'configure'))->invoke($mailchimp);
+        do_action('meros_integration_configured_test_mailchimp');
+        $action = $register->get('mailchimp_send_email_with_template');
+        self::assertInstanceOf(FlowAction::class, $action);
+        self::assertTrue($register->hasRegisteredFeature('mailchimp_send_email_with_template'));
+        return $action;
+    }
+
+    private function templateInput(): array {
+        return [
+            'template_id' => 'welcome',
+            'email_subject' => 'Welcome',
+            'email_body' => '<p>Hello</p><script>unsafe</script>',
+            'to_recipients' => [['recipient_email_address' => 'to@example.com']],
+            'cc_recipients' => [['recipient_email_address' => 'cc@example.com']],
+            'bcc_recipients' => [['recipient_email_address' => 'bcc@example.com']],
+        ];
+    }
+
+    public function testTemplateFlowChecksTemplateAndSendsSanitizedBody(): void {
+        $history = [];
+        $mailchimp = $this->mockedClient([
+            $this->response(200, '{"slug":"welcome"}'),
+            $this->response(200, '[{"email":"to@example.com","status":"sent"},{"email":"cc@example.com","status":"queued"},{"email":"bcc@example.com","status":"sent"}]'),
+        ], $history);
+        $action = $this->templateAction($mailchimp);
+        $schema = $action->getInputSchema();
+        self::assertTrue($schema['to_recipients']['required']);
+        self::assertFalse($schema['cc_recipients']['required']);
+        self::assertFalse($schema['bcc_recipients']['required']);
+        $result = $action->run($this->templateInput());
+        self::assertFalse($result->hasError());
+        self::assertSame('Email sent successfully.', $result->output());
+        self::assertCount(2, $history);
+        self::assertSame('/api/1.3/templates/info', $history[0]['request']->getUri()->getPath());
+        self::assertSame('welcome', json_decode((string) $history[0]['request']->getBody(), true)['name']);
+        self::assertSame('/api/1.3/messages/send-template', $history[1]['request']->getUri()->getPath());
+        $payload = json_decode((string) $history[1]['request']->getBody(), true);
+        self::assertSame('welcome', $payload['template_name']);
+        self::assertSame('Welcome', $payload['message']['subject']);
+        self::assertSame([['name' => 'BODY', 'content' => '<p style="margin:0;">Hello</p>']], $payload['message']['global_merge_vars']);
+        self::assertSame([
+            ['email' => 'to@example.com', 'type' => 'to'],
+            ['email' => 'cc@example.com', 'type' => 'cc'],
+            ['email' => 'bcc@example.com', 'type' => 'bcc'],
+        ], $payload['message']['to']);
+    }
+
+    public function testTemplateFlowReportsFailuresWithoutSending(): void {
+        $history = [];
+        $mailchimp = $this->mockedClient([
+            $this->response(404, '{"name":"Unknown_Template"}'),
+            $this->response(401, '{"name":"Invalid_Key"}'),
+            $this->response(200, '{"name":"missing-slug"}'),
+            $this->response(200, '{"slug":"welcome"}'),
+            $this->response(200, '[{"email":"to@example.com","status":"rejected"}]'),
+        ], $history);
+        $action = $this->templateAction($mailchimp);
+        foreach ([
+            ['template_id' => '  '],
+            ['to_recipients' => []],
+            ['cc_recipients' => [['recipient_email_address' => 'bad']]],
+            ['email_body' => '<script>unsafe</script>'],
+        ] as $invalid) {
+            self::assertTrue($action->run(array_replace($this->templateInput(), $invalid))->hasError());
+        }
+        self::assertCount(0, $history);
+        unset(WordPressState::$options['mailchimp_test']['transactional_api_key_default']);
+        self::assertTrue($action->run($this->templateInput())->hasError());
+        self::assertCount(0, $history);
+        WordPressState::$options['mailchimp_test']['transactional_api_key_default'] = 'fake-transactional';
+        self::assertSame('Mailchimp Transactional template not found.', $action->run($this->templateInput())->getError());
+        self::assertStringContainsString('HTTP 401', $action->run($this->templateInput())->getError());
+        self::assertSame('Mailchimp returned an invalid template response.', $action->run($this->templateInput())->getError());
+        self::assertSame('Failed to send email using the Mailchimp template.', $action->run($this->templateInput())->getError());
+        self::assertCount(5, $history);
     }
 }

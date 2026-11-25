@@ -1,5 +1,4 @@
 <?php
-
 namespace MM\Meros\EmailConnectors\Tests\Support {
     use MailchimpMarketing\ApiClient as MarketingClient;
     use MailchimpTransactional\ApiClient as TransactionalClient;
@@ -27,5 +26,19 @@ namespace MM\Meros\EmailConnectors\Tests\Support {
         protected function logError(string $title, string $message = '', ?int $code = null): void { $this->errors[] = [$title, $message, $code]; }
         public function makeMarketingClient(): MarketingClient { return $this->marketingClient(); }
         public function makeTransactionalClient(): TransactionalClient { return $this->transactionalClient(); }
+    }
+}
+
+namespace {
+    if (!function_exists('get_template_directory_uri')) {
+        function get_template_directory_uri(): string {
+            return 'https://meros.test/theme';
+        }
+    }
+
+    if (!function_exists('wp_kses_post')) {
+        function wp_kses_post(string $value): string {
+            return str_replace('<script>unsafe</script>', '', $value);
+        }
     }
 }

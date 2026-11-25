@@ -6,9 +6,16 @@ use GuzzleHttp\Exception\GuzzleException;
 use MailchimpMarketing\ApiClient as MarketingClient;
 use MailchimpMarketing\ApiException as MarketingException;
 use MailchimpTransactional\ApiClient as TransactionalClient;
+
 use MM\Meros\Contracts\Features\Admin\Setting;
 use MM\Meros\Contracts\Features\Integrations\Integration;
 use MM\Meros\Contracts\Features\Integrations\Interfaces\Mailer;
+
+use MM\Meros\Contracts\Features\Components\Field;
+
+use MM\Meros\Contracts\Features\Automation\FlowAction;
+use MM\Meros\Contracts\Features\Automation\FlowActionResponse;
+use MM\Meros\Support\EmailHelpers;
 
 class Mailchimp extends Integration implements Mailer {
     protected string $category = 'mail';
@@ -20,6 +27,95 @@ class Mailchimp extends Integration implements Mailer {
         $this->label('Mailchimp');
         $this->description('Manage Mailchimp audiences and send transactional email.');
         $this->instructions('Configure the Marketing and Transactional API keys for the services you use.');
+        $this->registerSendWithTemplateFlowAction();
+    }
+
+    private function registerSendWithTemplateFlowAction(): void {
+        $this->registerFlowAction(function (FlowAction $action) {
+            $action->name('mailchimp_send_email_with_template');
+            $action->label('Send Email with Mailchimp Template');
+            $action->description('Send an email using a Mailchimp template.');
+            $action->addInput(
+                'template_id',
+                'string',
+                label: 'Template Slug',
+                description: 'The immutable slug of a published Mailchimp Transactional template.',
+                required: true,
+                outsideRepeater: true
+            );
+            $action->addInput(
+                'email_subject',
+                'string',
+                label: 'Email Subject',
+                required: true,
+                outsideRepeater: true
+            );
+
+            $action->addInput(
+                'email_body',
+                'string',
+                label: 'Email Body',
+                description: 'Inserted into the template as the BODY merge variable. Add *|HTML:BODY|* to the template for HTML.',
+                required: true,
+                fieldType: 'richtext',
+                outsideRepeater: true,
+                fieldCallback: function (Field $field) {
+                    $field->__suggestDynamicValues();
+                }
+            );
+
+            EmailHelpers::addRecipientInputs($action);
+
+            $action->runner(function (array $input): FlowActionResponse {
+                $template = $input['template_id'] ?? '';
+                $subject = $input['email_subject'] ?? '';
+                $body = $input['email_body'] ?? '';
+                $to = EmailHelpers::getRecipients($input, 'to');
+                $cc = EmailHelpers::getRecipients($input, 'cc');
+                $bcc = EmailHelpers::getRecipients($input, 'bcc');
+
+                if ($to === null || $cc === null || $bcc === null) {
+                    return new FlowActionResponse(null, 'Invalid email recipient.');
+                }
+                if (!is_string($template) || trim($template) === '' ||
+                    !is_string($subject) || trim($subject) === '' ||
+                    !is_string($body) || $body === '' || $to === []) {
+                    return new FlowActionResponse(null, 'Template slug, subject, body and at least one recipient are required.');
+                }
+
+                $body = wp_kses_post($body);
+                if ($body === '') {
+                    return new FlowActionResponse(null, 'Email body is empty after sanitization.');
+                }
+
+                try {
+                    $templateInfo = $this->getTemplate(trim($template));
+                } catch (\RuntimeException $exception) {
+                    return new FlowActionResponse(null, $exception->getCode() === 404
+                        ? 'Mailchimp Transactional template not found.'
+                        : 'Unable to check Mailchimp Transactional template: ' . $exception->getMessage());
+                }
+
+                if (!is_string($templateInfo->slug ?? null) || trim($templateInfo->slug) === '') {
+                    $this->logError('Invalid Mailchimp template response', 'Template lookup did not return a slug.');
+                    return new FlowActionResponse(null, 'Mailchimp returned an invalid template response.');
+                }
+
+                $sent = $this->sendMailWithTemplate(
+                    $templateInfo->slug,
+                    $to,
+                    $subject,
+                    [],
+                    ['BODY' => EmailHelpers::formatBody($body, false)],
+                    $cc,
+                    $bcc
+                );
+
+                return $sent
+                    ? new FlowActionResponse('Email sent successfully.')
+                    : new FlowActionResponse(null, 'Failed to send email using the Mailchimp template.');
+            });
+        });
     }
 
     /**
@@ -408,7 +504,7 @@ class Mailchimp extends Integration implements Mailer {
             : null;
         $message = 'Mailchimp ' . $service . ' request failed' . ($status !== null ? ' (HTTP ' . $status . ')' : '') . '.';
         $this->logError('Mailchimp request failed', $message, $status);
-        throw new \RuntimeException($message);
+        throw new \RuntimeException($message, $status ?? 0);
     }
 
     /**
