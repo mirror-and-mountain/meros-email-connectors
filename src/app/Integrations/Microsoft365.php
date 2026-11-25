@@ -7,7 +7,9 @@ use MM\Meros\Contracts\Features\Integrations\OAuthIntegration;
 use MM\Meros\Contracts\Features\Integrations\Concerns\UsesClientId;
 use MM\Meros\Contracts\Features\Integrations\Concerns\UsesClientSecret;
 
-class Microsoft365 extends OAuthIntegration {
+use MM\Meros\Contracts\Features\Integrations\Interfaces\Mailer;
+
+class Microsoft365 extends OAuthIntegration implements Mailer {
     /**
      * The category of the integration.
      *
@@ -77,29 +79,49 @@ class Microsoft365 extends OAuthIntegration {
      * Submit a message from the connected mailbox. Acceptance does not guarantee delivery.
      *
      * @param array<string> $to
+     * @param string  $subject
+     * @param string  $body
+     * @param array<string> $cc
+     * @param array<string> $bcc
+     * @param boolean $html
+     *
+     * @return boolean
      */
-    public function sendMail(array $to, string $subject, string $body, bool $html = false): void {
+    public function sendMail(
+        array $to,
+        string $subject,
+        string $body,
+        array $cc = [],
+        array $bcc = [],
+        bool $html = false
+    ): bool {
         if ($to === []) {
             $this->logError('No recipients', 'At least one recipient is required.');
-            return;
+            return false;
         }
 
-        foreach ($to as $address) {
-            if (!is_string($address) || filter_var($address, FILTER_VALIDATE_EMAIL) === false) {
-                $this->logError('Invalid recipient', 'The email address "' . $address . '" is not valid.');
-                return;
+        $recipients = [];
+        foreach (['toRecipients' => $to, 'ccRecipients' => $cc, 'bccRecipients' => $bcc] as $key => $addresses) {
+            $recipients[$key] = [];
+            foreach ($addresses as $address) {
+                if (!is_string($address) || filter_var($address, FILTER_VALIDATE_EMAIL) === false) {
+                    $this->logError('Invalid recipient', 'An email address in ' . $key . ' is not valid.');
+                    return false;
+                }
+
+                $recipients[$key][] = ['emailAddress' => ['address' => $address]];
             }
         }
 
-        if (!$this->hasActiveConnection()) {
-            $this->logError('No active connection', 'Microsoft 365 is not enabled or has no active connection.');
-            return;
+        if (!$this->ready()) {
+            $this->logError('Integration not ready', 'Microsoft 365 is disabled or is missing an active connection or required configuration.');
+            return false;
         }
 
         $token = $this->getAccessToken();
         if ($token === null || $token === '') {
             $this->logError('No access token', 'No Microsoft 365 access token is available.');
-            return;
+            return false;
         }
 
         $payload = [
@@ -109,22 +131,30 @@ class Microsoft365 extends OAuthIntegration {
                     'contentType' => $html ? 'HTML' : 'Text',
                     'content' => $body,
                 ],
-                'toRecipients' => array_map(
-                    fn (string $address) => ['emailAddress' => ['address' => $address]],
-                    array_values($to)
-                ),
+                'toRecipients' => $recipients['toRecipients'],
             ],
         ];
 
+        foreach (['ccRecipients', 'bccRecipients'] as $key) {
+            if ($recipients[$key] !== []) {
+                $payload['message'][$key] = $recipients[$key];
+            }
+        }
+
+        $request = $this->mailRequest($payload['message']);
+        if ($request === null) {
+            return false;
+        }
+
         $send = fn (string $accessToken) => $this->httpClient()->send([
             'method' => 'POST',
-            'url' => 'https://graph.microsoft.com/v1.0/me/sendMail',
+            'url' => $request['url'],
             'headers' => [
                 'Authorization' => 'Bearer ' . $accessToken,
                 'Accept' => 'application/json',
             ],
             'format' => 'json',
-            'payload' => $payload,
+            'payload' => $request['payload'],
         ]);
 
         $response = $send($token);
@@ -132,7 +162,7 @@ class Microsoft365 extends OAuthIntegration {
             $token = $this->refreshToken();
             if ($token === null || $token === '') {
                 $this->logError('Access token refresh failed', 'Microsoft 365 access token refresh failed; the message was not sent.');
-                return;
+                return false;
             }
             $response = $send($token);
         }
@@ -141,8 +171,17 @@ class Microsoft365 extends OAuthIntegration {
             $error = $response->json('error.code');
             $detail = is_string($error) && $error !== '' ? ' (' . $error . ')' : '';
             $this->logError('Message rejected', 'Microsoft Graph rejected the message. HTTP ' . $response->status() . $detail . '.');
-            return;
+            return false;
         }
+
+        return true;
+    }
+
+    protected function mailRequest(array $message): ?array {
+        return [
+            'url' => 'https://graph.microsoft.com/v1.0/me/sendMail',
+            'payload' => ['message' => $message],
+        ];
     }
 
     /**

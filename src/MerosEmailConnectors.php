@@ -4,6 +4,10 @@ namespace MM\Meros\EmailConnectors;
 
 use MM\Meros\App\Package;
 use MM\Meros\EmailConnectors\App\Integrations\Microsoft365;
+use MM\Meros\EmailConnectors\App\Integrations\Microsoft365SharedMailbox;
+use MM\Meros\EmailConnectors\App\Integrations\Mailchimp;
+
+use MM\Meros\Facades\Data\Integrations;
 
 final class MerosEmailConnectors extends Package {
     /**
@@ -20,7 +24,11 @@ final class MerosEmailConnectors extends Package {
 
     public function configure(): void {
         $this->integrations(Microsoft365::class)->make();
+        $this->integrations(Microsoft365SharedMailbox::class)->make();
+        $this->integrations(Mailchimp::class)->make();
+
+        $mailchimp = Integrations::connect('mailchimp');
+
+        // dd($mailchimp->ready());
     }
-
-
 }
