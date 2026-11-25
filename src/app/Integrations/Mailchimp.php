@@ -72,6 +72,10 @@ class Mailchimp extends Integration implements Mailer {
             EmailHelpers::addRecipientInputs($action);
 
             $action->runner(function (array $input): FlowActionResponse {
+                if ($this->ready('transactional') === false) {
+                    return new FlowActionResponse(null, 'Mailchimp transactional client is not ready.');
+                }
+
                 $template = $input['template_id'] ?? '';
                 $subject = $input['email_subject'] ?? '';
                 $body = $input['email_body'] ?? '';
