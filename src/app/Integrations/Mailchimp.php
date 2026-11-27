@@ -30,6 +30,10 @@ class Mailchimp extends Integration implements Mailer {
         $this->registerSendWithTemplateFlowAction();
     }
 
+    public function prefersHTML(): bool {
+        return true;
+    }
+
     /**
      * Register the "Send Email with Mailchimp Template" flow action.
      *

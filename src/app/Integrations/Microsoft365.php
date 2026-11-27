@@ -36,6 +36,10 @@ class Microsoft365 extends OAuthIntegration implements Mailer {
         $this->clientSecretLabel = 'Client Secret';
         $this->clientSecretDescription = 'The client secret value of your Microsoft Entra app registration.';
     }
+    
+    public function prefersHTML(): bool {
+        return false;
+    }
 
     protected function initCustomSettings(): void {
         $this->settings()->add('string', function (Setting $setting) {
